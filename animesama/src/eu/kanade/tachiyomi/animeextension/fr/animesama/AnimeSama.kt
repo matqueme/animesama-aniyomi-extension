@@ -10,6 +10,7 @@ import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.lib.sendvidextractor.SendvidExtractor
 import eu.kanade.tachiyomi.lib.sibnetextractor.SibnetExtractor
+import eu.kanade.tachiyomi.lib.vidhideextractor.VidHideExtractor
 import eu.kanade.tachiyomi.lib.vidmolyextractor.VidMolyExtractor
 import eu.kanade.tachiyomi.lib.vkextractor.VkExtractor
 import eu.kanade.tachiyomi.network.GET
@@ -57,11 +58,7 @@ class AnimeSama : AnimeDomainSource() {
     override fun latestUpdatesParse(response: Response): AnimesPage {
         val animes = response.asJsoup()
         val seasons = animes.select("#containerAjoutsAnimes > div").flatMap {
-            var href = it.getElementsByTag("a").attr("href")
-            if (href.startsWith("/")) {
-                href = baseUrl + href
-            }
-            val animeUrl = href.toHttpUrl()
+            val animeUrl = it.getElementsByTag("a").attr("href").toHttpUrl()
             val url = animeUrl.newBuilder()
                 .removePathSegment(animeUrl.pathSize - 2)
                 .removePathSegment(animeUrl.pathSize - 3)
@@ -117,18 +114,26 @@ class AnimeSama : AnimeDomainSource() {
     private val vkExtractor by lazy { VkExtractor(client, headers) }
     private val sendvidExtractor by lazy { SendvidExtractor(client, headers) }
     private val vidMolyExtractor by lazy { VidMolyExtractor(client, headers) }
+    private val vidHideExtractor by lazy { VidHideExtractor(client, headers) }
 
     override suspend fun getVideoList(episode: SEpisode): List<Video> {
         val playerUrls = json.decodeFromString<List<List<String>>>(episode.url)
         val videos = playerUrls.flatMapIndexed { i, it ->
             val prefix = "(${VOICES_VALUES[i].uppercase()}) "
             it.parallelCatchingFlatMap { playerUrl ->
-                with(playerUrl) {
+                val adjustedUrl = if (playerUrl.contains("vidmoly.to")) {
+                    playerUrl.replace("vidmoly.to", "vidmoly.biz")
+                } else {
+                    playerUrl
+                }
+
+                with(adjustedUrl) {
                     when {
-                        contains("sibnet.ru") -> sibnetExtractor.videosFromUrl(playerUrl, prefix)
-                        contains("vk.") -> vkExtractor.videosFromUrl(playerUrl, prefix)
-                        contains("sendvid.com") -> sendvidExtractor.videosFromUrl(playerUrl, prefix)
-                        contains("vidmoly.to") -> vidMolyExtractor.videosFromUrl(playerUrl, prefix)
+                        contains("sibnet.ru") -> sibnetExtractor.videosFromUrl(adjustedUrl, prefix)
+                        contains("vk.") -> vkExtractor.videosFromUrl(adjustedUrl, prefix)
+                        contains("sendvid.com") -> sendvidExtractor.videosFromUrl(adjustedUrl, prefix)
+                        contains("vidmoly") -> vidMolyExtractor.videosFromUrl(adjustedUrl, prefix)
+                        contains("minochinos.com") -> vidHideExtractor.videosFromUrl(adjustedUrl, { quality -> "${prefix}VidHide - $quality" })
                         else -> emptyList()
                     }
                 }
@@ -139,11 +144,13 @@ class AnimeSama : AnimeDomainSource() {
 
     // ============================ Utils =============================
     override fun List<Video>.sort(): List<Video> {
+        val player = preferences.getString(PREF_PLAYER_KEY, PREF_PLAYER_DEFAULT)!!
         val voices = preferences.getString(PREF_VOICES_KEY, PREF_VOICES_DEFAULT)!!
         val quality = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT)!!
 
         return this.sortedWith(
             compareBy(
+                { it.quality.contains(player, true) },
                 { it.quality.contains(voices, true) },
                 { it.quality.contains(quality) },
             ),
@@ -192,7 +199,7 @@ class AnimeSama : AnimeDomainSource() {
                 title = it.first
                 thumbnail_url = animeDoc.getElementById("coverOeuvre")?.attr("src")
                 description = animeDoc.select("h2:contains(synopsis) + p").text()
-                genre = animeDoc.select("h2:contains(genres) + a").text()
+                genre = animeDoc.select("h2:contains(genres) + a").text().replace(" - ", ", ")
                 setUrlWithoutDomain(it.second)
                 status = it.third
                 initialized = true
@@ -234,6 +241,22 @@ class AnimeSama : AnimeDomainSource() {
         super.setupPreferenceScreen(screen)
 
         ListPreference(screen.context).apply {
+            key = PREF_PLAYER_KEY
+            title = "Lecteur préféré"
+            entries = PLAYERS
+            entryValues = PLAYERS
+            setDefaultValue(PREF_PLAYER_DEFAULT)
+            summary = "%s"
+
+            setOnPreferenceChangeListener { _, newValue ->
+                val selected = newValue as String
+                val index = findIndexOfValue(selected)
+                val entry = entryValues[index] as String
+                preferences.edit().putString(key, entry).commit()
+            }
+        }.also(screen::addPreference)
+
+        ListPreference(screen.context).apply {
             key = PREF_QUALITY_KEY
             title = "Preferred quality"
             entries = arrayOf("1080p", "720p", "480p", "360p")
@@ -268,6 +291,17 @@ class AnimeSama : AnimeDomainSource() {
 
     companion object {
         const val PREFIX_SEARCH = "id:"
+
+        private val PLAYERS = arrayOf(
+            "Sibnet",
+            "Sendvid",
+            "VidMoly",
+            "VidHide",
+            "VK",
+        )
+
+        private const val PREF_PLAYER_KEY = "player_preference"
+        private const val PREF_PLAYER_DEFAULT = "Sibnet"
 
         private val VOICES = arrayOf(
             "Préférer VOSTFR",
